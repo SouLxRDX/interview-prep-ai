@@ -1,0 +1,49 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: interview
+  labels:
+    app: backend
+spec:
+  replicas: {{ .Values.backend.replicas }}
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+    spec:
+      containers:
+        - name: backend
+          image: {{ .Values.backend.image }}
+          imagePullPolicy: Always
+          ports:
+            - containerPort: {{ .Values.backend.port }}
+          env:
+            - name: GROQ_API_KEYS
+              value: {{ printf "%s,%s,%s" .Values.backend.env.GROQ_API_KEY .Values.backend.env.GROQ_API_KEY_2 .Values.backend.env.GROQ_API_KEY_3 | quote }}
+            - name: GEMINI_API_KEYS
+              value: {{ printf "%s,%s" .Values.backend.env.GEMINI_API_KEY .Values.backend.env.GEMINI_API_KEY_2 | quote }}
+            - name: OPENROUTER_API_KEYS
+              value: {{ .Values.backend.env.OPENROUTER_API_KEYS | quote }}
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.backend.port }}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.backend.port }}
+            initialDelaySeconds: 15
+            periodSeconds: 20

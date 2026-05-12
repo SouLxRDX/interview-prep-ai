@@ -1,0 +1,107 @@
+---
+# ─────────────────────────────────────────────────────────────
+# Ansible Playbook — Interview Prep AI Cluster Setup
+# Run: ansible-playbook playbooks/setup-cluster.yml
+# ─────────────────────────────────────────────────────────────
+
+- name: Setup EKS Cluster
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    region:       "ap-south-1"
+    cluster_name: "interview-eks"
+    namespace:    "interview"
+
+  tasks:
+
+    # ── Step 1: Connect kubectl to EKS ──────────────────────────
+    - name: Configure kubectl for EKS
+      command: >
+        aws eks update-kubeconfig
+        --region {{ region }}
+        --name {{ cluster_name }}
+
+    - name: Verify cluster connection
+      command: kubectl cluster-info
+      register: cluster_info
+
+    - name: Show cluster info
+      debug:
+        msg: "{{ cluster_info.stdout }}"
+
+    # ── Step 2: Install ArgoCD ───────────────────────────────────
+    - name: Create argocd namespace
+      command: kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f -
+
+    - name: Install ArgoCD
+      command: >
+        kubectl apply -n argocd -f
+        https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+
+    - name: Wait for ArgoCD to be ready
+      command: kubectl rollout status deployment/argocd-server -n argocd --timeout=120s
+
+    - name: Get ArgoCD admin password
+      command: >
+        kubectl get secret argocd-initial-admin-secret
+        -n argocd -o jsonpath="{.data.password}"
+      register: argocd_password_b64
+
+    - name: Decode ArgoCD password
+      command: echo "{{ argocd_password_b64.stdout }}" | base64 -d
+      register: argocd_password
+
+    - name: Show ArgoCD password
+      debug:
+        msg: "ArgoCD admin password: {{ argocd_password.stdout }}"
+
+    # ── Step 3: Install Prometheus + Grafana ────────────────────
+    - name: Add prometheus helm repo
+      command: helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+
+    - name: Update helm repos
+      command: helm repo update
+
+    - name: Create monitoring namespace
+      command: kubectl create namespace monitoring --dry-run=client -o yaml | kubectl apply -f -
+
+    - name: Install Prometheus + Grafana stack
+      command: >
+        helm upgrade --install prometheus
+        prometheus-community/kube-prometheus-stack
+        --namespace monitoring
+        --set grafana.adminPassword=admin123
+        --wait --timeout 5m
+
+    - name: Verify monitoring stack
+      command: kubectl get pods -n monitoring
+
+    # ── Step 4: Install Metrics Server (needed for HPA) ─────────
+    - name: Install metrics-server
+      command: >
+        kubectl apply -f
+        https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+
+    # ── Step 5: Create app namespace ────────────────────────────
+    - name: Create interview namespace
+      command: kubectl create namespace {{ namespace }} --dry-run=client -o yaml | kubectl apply -f -
+
+    # ── Step 6: Register app with ArgoCD ────────────────────────
+    - name: Apply ArgoCD app config
+      command: kubectl apply -f argocd-app.yaml
+
+    # ── Done ────────────────────────────────────────────────────
+    - name: Summary
+      debug:
+        msg:
+          - "✅ kubectl connected to {{ cluster_name }}"
+          - "✅ ArgoCD installed — password: {{ argocd_password.stdout }}"
+          - "✅ Prometheus + Grafana installed"
+          - "✅ Metrics server installed"
+          - "✅ App namespace created"
+          - "✅ ArgoCD app registered"
+          - ""
+          - "Next: kubectl port-forward svc/argocd-server -n argocd 8080:443"
+          - "Then open: https://localhost:8080 (admin / {{ argocd_password.stdout }})"

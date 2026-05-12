@@ -1,0 +1,23 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: interview-prep
+  namespace: argocd
+spec:
+  project: default
+
+  source:
+    repoURL: https://github.com/SouLxRDX/interview-prep-ai
+    targetRevision: main
+    path: helm/interview-prep
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: interview
+
+  syncPolicy:
+    automated:
+      prune: true       # delete resources removed from helm chart
+      selfHeal: true    # auto fix if someone manually changes something
+    syncOptions:
+      - CreateNamespace=true

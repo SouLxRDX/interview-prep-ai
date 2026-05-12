@@ -1,0 +1,12 @@
+# OS files
+.DS_Store
+Thumbs.db
+
+helm/interview-prep/values.yaml
+override-values.yaml
+deploy-values.yaml
+replacements.txt
+
+.env
+frontend/.env
+backend/.env
