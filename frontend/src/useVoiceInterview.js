@@ -1,6 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from "react"
 
-const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000"
+const API_URL = import.meta.env.VITE_API_URL
 
 // Audio detection thresholds
 const SILENCE_THRESHOLD = 0.012   // RMS below this = silence

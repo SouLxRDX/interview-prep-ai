@@ -1,15 +1,27 @@
 apiVersion: networking.k8s.io/v1
 kind: Ingress
+
 metadata:
   name: interview-prep
   namespace: interview
+
   annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
     nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+
 spec:
   ingressClassName: {{ .Values.ingress.className }}
+
+  tls:
+    - hosts:
+        - interview-prep.duckdns.org
+      secretName: interview-prep-tls
+
   rules:
-    - http:
+    - host: interview-prep.duckdns.org
+
+      http:
         paths:
           - path: /api
             pathType: Prefix
@@ -18,6 +30,7 @@ spec:
                 name: backend
                 port:
                   number: 8001
+
           - path: /
             pathType: Prefix
             backend:

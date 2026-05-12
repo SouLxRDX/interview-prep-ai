@@ -3,7 +3,7 @@ import useVoiceInterview from "./useVoiceInterview"
 import VoicePanel from "./VoicePanel"
 import HistoryModal from "./HistoryModal"
 
-const API_URL = "http://a887eaa94764b4313ab15bdab6e2ef43-652016659.ap-south-1.elb.amazonaws.com/api"
+const API_URL = import.meta.env.VITE_API_URL
 
 const DEFAULT_ROLES = [
   { id: "devops",   label: "DevOps Engineer",   topics: ["CI/CD","Kubernetes","Monitoring","Networking","Security"] },
