@@ -8,7 +8,9 @@ from dotenv import load_dotenv
 from groq import Groq
 from google import genai
 from pypdf import PdfReader
-import os, uuid, json, sqlite3, io, logging, re, asyncio, time
+import os, uuid, json, io, logging, re, asyncio, time
+import psycopg2
+import psycopg2.extras
 import queue as thread_queue
 from datetime import datetime, timedelta, timezone
 
@@ -36,8 +38,7 @@ SESSION_TTL = timedelta(minutes=60)
 CLEANUP_INTERVAL_SEC = 300
 MEMORY_UPDATE_EVERY = 2  # update memory every N user answers
 
-# Always save DB next to main.py regardless of working directory
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "interviews.db")
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 
 def _default_memory() -> dict:
@@ -46,9 +47,9 @@ def _default_memory() -> dict:
         "topics_covered": [],
         "strengths_seen": [],
         "weak_signals": [],
-        "confidence_level": "unknown",      # low / medium / high / unknown
+        "confidence_level": "unknown",
         "communication_notes": "",
-        "effective_difficulty": "as_selected", # easier / as_selected / harder
+        "effective_difficulty": "as_selected",
         "adaptation_reason": "",
     }
 
@@ -89,12 +90,11 @@ RULES:
     )
     parsed = parse_json_from_ai(result.content)
     if parsed:
-        # Merge: keep cumulative lists, cap lengths
         merged = dict(current_memory)
         for key in ["topics_covered", "strengths_seen", "weak_signals"]:
             existing = set(merged.get(key, []))
             existing.update(parsed.get(key, []))
-            merged[key] = list(existing)[-8:]  # cap at 8 items
+            merged[key] = list(existing)[-8:]
         for key in ["confidence_level", "communication_notes", "effective_difficulty", "adaptation_reason"]:
             if parsed.get(key):
                 merged[key] = parsed[key]
@@ -103,11 +103,10 @@ RULES:
     logger.warning("Memory update parse failed, keeping existing memory")
     return current_memory
 
+
 # --------------------------------------------------
 # AI Clients & Structured Response
 # --------------------------------------------------
-
-# ── Multi-key pools (comma-separated in .env) ──
 
 GROQ_KEYS = [k.strip() for k in os.getenv("GROQ_API_KEYS", "").split(",") if k.strip()]
 GEMINI_KEYS = [k.strip() for k in os.getenv("GEMINI_API_KEYS", "").split(",") if k.strip()]
@@ -133,7 +132,7 @@ logger.info(f"Loaded {len(groq_clients)} Groq key(s), {len(gemini_clients)} Gemi
 class AIResult:
     """Structured return from call_ai — provides observability metadata."""
     content: str
-    provider: str       # "groq" | "gemini" | "none"
+    provider: str
     latency_ms: float
     fallback_used: bool
 
@@ -143,7 +142,6 @@ def _now() -> str:
 
 
 def _client_available(entry: dict) -> bool:
-    """Check if a key is past its cooldown period."""
     cooldown = entry["cooldown_until"]
     if cooldown is None:
         return True
@@ -153,7 +151,7 @@ def _client_available(entry: dict) -> bool:
 def call_ai(messages: list, max_tokens: int = 250, temperature: float = 0.75) -> AIResult:
     """
     Multi-key rotation with cooldown.
-    Tries all Groq keys → all Gemini keys → graceful failure.
+    Tries all Groq keys → all Gemini keys → OpenRouter → graceful failure.
     Rate-limited keys (429) get a 5-minute cooldown.
     """
     start = time.monotonic()
@@ -162,7 +160,6 @@ def call_ai(messages: list, max_tokens: int = 250, temperature: float = 0.75) ->
     for entry in groq_clients:
         if not _client_available(entry):
             continue
-
         try:
             res = entry["client"].chat.completions.create(
                 model="llama-3.3-70b-versatile",
@@ -188,7 +185,6 @@ def call_ai(messages: list, max_tokens: int = 250, temperature: float = 0.75) ->
     for entry in gemini_clients:
         if not _client_available(entry):
             continue
-
         try:
             system_text = next(
                 (m["content"] for m in messages if m["role"] == "system"), ""
@@ -221,7 +217,6 @@ def call_ai(messages: list, max_tokens: int = 250, temperature: float = 0.75) ->
             if "429" in str(e):
                 entry["cooldown_until"] = datetime.now(timezone.utc) + timedelta(minutes=5)
             continue
-
 
     # ── Fallback 2: OpenRouter pool ──
     import urllib.request
@@ -278,15 +273,14 @@ def call_ai(messages: list, max_tokens: int = 250, temperature: float = 0.75) ->
 # --------------------------------------------------
 
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+    return psycopg2.connect(DATABASE_URL)
 
 
 def init_db():
     conn = get_db()
     try:
-        conn.execute("""
+        cur = conn.cursor()
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS interviews (
                 session_id   TEXT PRIMARY KEY,
                 role         TEXT NOT NULL,
@@ -297,16 +291,16 @@ def init_db():
                 resume_text  TEXT DEFAULT ''
             )
         """)
-        conn.execute("""
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS messages (
-                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                id         SERIAL PRIMARY KEY,
                 session_id TEXT NOT NULL,
                 role       TEXT NOT NULL,
                 content    TEXT NOT NULL,
                 created_at TEXT NOT NULL
             )
         """)
-        conn.execute("""
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS evaluations (
                 session_id      TEXT PRIMARY KEY,
                 overall_score   INTEGER,
@@ -327,8 +321,9 @@ def init_db():
 def _db_insert_interview(session_id, role, difficulty):
     conn = get_db()
     try:
-        conn.execute(
-            "INSERT INTO interviews (session_id, role, difficulty, started_at) VALUES (?,?,?,?)",
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO interviews (session_id, role, difficulty, started_at) VALUES (%s,%s,%s,%s)",
             (session_id, role, difficulty, _now()),
         )
         conn.commit()
@@ -339,8 +334,9 @@ def _db_insert_interview(session_id, role, difficulty):
 def _db_save_message(session_id, role, content):
     conn = get_db()
     try:
-        conn.execute(
-            "INSERT INTO messages (session_id, role, content, created_at) VALUES (?,?,?,?)",
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO messages (session_id, role, content, created_at) VALUES (%s,%s,%s,%s)",
             (session_id, role, content, _now()),
         )
         conn.commit()
@@ -351,11 +347,21 @@ def _db_save_message(session_id, role, content):
 def _db_save_evaluation(session_id, ev: dict):
     conn = get_db()
     try:
-        conn.execute(
-            """INSERT OR REPLACE INTO evaluations
+        cur = conn.cursor()
+        cur.execute(
+            """INSERT INTO evaluations
                (session_id, overall_score, communication, technical_depth,
                 problem_solving, strengths, weak_areas, summary, created_at)
-               VALUES (?,?,?,?,?,?,?,?,?)""",
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+               ON CONFLICT (session_id) DO UPDATE SET
+               overall_score=EXCLUDED.overall_score,
+               communication=EXCLUDED.communication,
+               technical_depth=EXCLUDED.technical_depth,
+               problem_solving=EXCLUDED.problem_solving,
+               strengths=EXCLUDED.strengths,
+               weak_areas=EXCLUDED.weak_areas,
+               summary=EXCLUDED.summary,
+               created_at=EXCLUDED.created_at""",
             (
                 session_id,
                 ev.get("overall_score", 0),
@@ -368,8 +374,8 @@ def _db_save_evaluation(session_id, ev: dict):
                 _now(),
             ),
         )
-        conn.execute(
-            "UPDATE interviews SET completed=1, completed_at=? WHERE session_id=?",
+        cur.execute(
+            "UPDATE interviews SET completed=1, completed_at=%s WHERE session_id=%s",
             (_now(), session_id),
         )
         conn.commit()
@@ -380,8 +386,9 @@ def _db_save_evaluation(session_id, ev: dict):
 def _db_set_resume(session_id, text):
     conn = get_db()
     try:
-        conn.execute(
-            "UPDATE interviews SET resume_text=? WHERE session_id=?",
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE interviews SET resume_text=%s WHERE session_id=%s",
             (text, session_id),
         )
         conn.commit()
@@ -392,15 +399,16 @@ def _db_set_resume(session_id, text):
 def _db_get_history(limit=30):
     conn = get_db()
     try:
-        rows = conn.execute(
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(
             """SELECT i.session_id, i.role, i.difficulty, i.started_at,
                       i.completed_at, i.completed, e.overall_score
                FROM interviews i
                LEFT JOIN evaluations e ON i.session_id = e.session_id
-               ORDER BY i.started_at DESC LIMIT ?""",
+               ORDER BY i.started_at DESC LIMIT %s""",
             (limit,),
-        ).fetchall()
-        return [dict(r) for r in rows]
+        )
+        return [dict(r) for r in cur.fetchall()]
     finally:
         conn.close()
 
@@ -408,19 +416,18 @@ def _db_get_history(limit=30):
 def _db_get_detail(session_id):
     conn = get_db()
     try:
-        row = conn.execute(
-            "SELECT * FROM interviews WHERE session_id=?", (session_id,)
-        ).fetchone()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("SELECT * FROM interviews WHERE session_id=%s", (session_id,))
+        row = cur.fetchone()
         if not row:
             return None
-        msgs = conn.execute(
-            "SELECT role, content, created_at FROM messages WHERE session_id=? ORDER BY id",
+        cur.execute(
+            "SELECT role, content, created_at FROM messages WHERE session_id=%s ORDER BY id",
             (session_id,),
-        ).fetchall()
-        ev = conn.execute(
-            "SELECT * FROM evaluations WHERE session_id=?", (session_id,)
-        ).fetchone()
-
+        )
+        msgs = cur.fetchall()
+        cur.execute("SELECT * FROM evaluations WHERE session_id=%s", (session_id,))
+        ev = cur.fetchone()
         result = dict(row)
         result["messages"] = [dict(m) for m in msgs]
         if ev:
@@ -438,9 +445,10 @@ def _db_get_detail(session_id):
 def _db_delete_session(session_id):
     conn = get_db()
     try:
-        conn.execute("DELETE FROM evaluations WHERE session_id=?", (session_id,))
-        conn.execute("DELETE FROM messages WHERE session_id=?", (session_id,))
-        conn.execute("DELETE FROM interviews WHERE session_id=?", (session_id,))
+        cur = conn.cursor()
+        cur.execute("DELETE FROM evaluations WHERE session_id=%s", (session_id,))
+        cur.execute("DELETE FROM messages WHERE session_id=%s", (session_id,))
+        cur.execute("DELETE FROM interviews WHERE session_id=%s", (session_id,))
         conn.commit()
     finally:
         conn.close()
@@ -450,15 +458,16 @@ def _db_hydrate_session(session_id):
     """Load session metadata + messages from DB. Returns (meta_dict, messages_list) or (None, [])."""
     conn = get_db()
     try:
-        meta = conn.execute(
-            "SELECT * FROM interviews WHERE session_id=?", (session_id,)
-        ).fetchone()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("SELECT * FROM interviews WHERE session_id=%s", (session_id,))
+        meta = cur.fetchone()
         if not meta:
             return None, []
-        msgs = conn.execute(
-            "SELECT role, content FROM messages WHERE session_id=? ORDER BY id",
+        cur.execute(
+            "SELECT role, content FROM messages WHERE session_id=%s ORDER BY id",
             (session_id,),
-        ).fetchall()
+        )
+        msgs = cur.fetchall()
         return dict(meta), [{"role": m["role"], "content": m["content"]} for m in msgs]
     finally:
         conn.close()
@@ -491,7 +500,7 @@ class InterviewSession:
         self._user_answer_count: int = 0
         self._completed: bool = False
         self._resume_text: str = ""
-        self._questions_asked: list[str] = []  # tracks AI questions for derived memory
+        self._questions_asked: list[str] = []
         self._memory: dict = _default_memory()
         self._last_accessed = datetime.now(timezone.utc)
 
@@ -499,12 +508,10 @@ class InterviewSession:
 
     @property
     def history(self) -> list[dict]:
-        """Return a copy — callers cannot mutate internals directly."""
         return list(self._history)
 
     @property
     def context_messages(self) -> list[dict]:
-        """Return trimmed history window for AI context."""
         return list(self._history[-HISTORY_CONTEXT_WINDOW:])
 
     @property
@@ -525,7 +532,6 @@ class InterviewSession:
 
     @property
     def memory(self) -> dict:
-        """Return a copy of semantic memory — callers cannot mutate internals."""
         return dict(self._memory)
 
     @property
@@ -547,15 +553,12 @@ class InterviewSession:
     # ── Mutation methods ──
 
     def add_user_message(self, content: str):
-        """Record a user message and increment answer count."""
         self._history.append({"role": "user", "content": content})
         self._user_answer_count += 1
         self._last_accessed = datetime.now(timezone.utc)
 
     def add_ai_message(self, content: str):
-        """Record an AI message and extract the question for derived memory."""
         self._history.append({"role": "assistant", "content": content})
-        # Track question text (first 120 chars) for context compression
         self._questions_asked.append(content[:120])
         self._trim_history()
         self._last_accessed = datetime.now(timezone.utc)
@@ -583,11 +586,9 @@ class InterviewSession:
         session._user_answer_count = len([m for m in messages if m["role"] == "user"])
         session._completed = bool(meta["completed"])
         session._resume_text = meta.get("resume_text", "") or ""
-        # Rebuild questions_asked from history
         session._questions_asked = [
             m["content"][:120] for m in messages if m["role"] == "assistant"
         ]
-        # Memory will be rebuilt on next memory update cycle
         session._memory = _default_memory()
         return session
 
@@ -597,11 +598,6 @@ class InterviewSession:
 # --------------------------------------------------
 
 class SessionManager:
-    """
-    Central authority for session lifecycle.
-    All session access goes through here — no direct dict manipulation.
-    """
-
     def __init__(self):
         self._sessions: dict[str, InterviewSession] = {}
 
@@ -615,19 +611,12 @@ class SessionManager:
         return session
 
     async def get(self, session_id: str) -> InterviewSession | None:
-        """
-        Return session from cache.
-        If missing (e.g. after server restart), hydrate from DB.
-        """
         session = self._sessions.get(session_id)
         if session:
             return session
-
-        # Hydrate from DB (in thread to avoid blocking event loop)
         meta, messages = await asyncio.to_thread(_db_hydrate_session, session_id)
         if not meta:
             return None
-
         session = InterviewSession.from_db(meta, messages)
         self._sessions[session_id] = session
         logger.info(f"Session {session_id[:8]}... hydrated from DB")
@@ -651,7 +640,6 @@ session_mgr = SessionManager()
 # --------------------------------------------------
 
 async def _periodic_cleanup():
-    """Background task: evict stale sessions independently of traffic."""
     while True:
         await asyncio.sleep(CLEANUP_INTERVAL_SEC)
         evicted = session_mgr.evict_stale()
@@ -713,6 +701,8 @@ CANDIDATE RESUME (use this to personalise your questions — reference their rea
 {session.resume_text[:3000]}
 --- END ---
 """
+    else:
+        resume_section = "\nNO RESUME PROVIDED — Do NOT mention a resume. Never say 'I have reviewed your resume' or anything similar.\n"
 
     # Derived memory: questions already asked — prevents repetition
     prior_questions = ""
@@ -740,7 +730,6 @@ QUESTIONS YOU HAVE ALREADY ASKED (do NOT repeat these topics):
     if mem.get("communication_notes"):
         memory_section += f"\nCOMMUNICATION STYLE: {mem['communication_notes']}\n"
 
-    # Adaptive difficulty
     eff_diff = mem.get("effective_difficulty", "as_selected")
     if eff_diff == "easier":
         adaptation_section = f"""
@@ -772,12 +761,35 @@ INTERVIEW STYLE:
 - Sound like an experienced real interviewer — not a chatbot.
 - Keep responses concise: 1 to 4 sentences normally.
 - Ask ONE question at a time. Never ask multiple questions.
-- Give brief acknowledgements after answers ("Good point.", "Makes sense.", "Nice approach.").
+- NEVER repeat or paraphrase the candidate's answer back to them. Acknowledge in 2-3 words max ("Got it.", "Makes sense.", "Okay.") then immediately ask your next question or follow-up.
 - Do NOT deeply evaluate answers mid-interview. Save that for the end.
 - Do NOT use bullet points in conversation.
-- Do NOT repeat the candidate's answer back to them.
 - Do NOT use filler phrases like "Great question!" or "Excellent answer!" every time.
-- If a resume is provided, acknowledge it briefly and naturally in your opening.
+
+ANSWER QUALITY RULES (most important):
+- NEVER accept a vague, short, or buzzword-heavy answer at face value.
+- If the answer is under 3 sentences, always follow up with a deeper question.
+- If the candidate names a technology without explaining it, pick one and drill: "You mentioned X — can you explain how it works under the hood?"
+- If no specific numbers, scale, or context are mentioned, ask: "What was the scale? How many users / requests / records?"
+- If no problem or failure is mentioned, ask: "What was the hardest part?" or "What would you do differently now?"
+- If the answer drifts off-topic, redirect firmly: "That's useful context, but I want to focus on — specifically how did you handle X?"
+
+PARAPHRASE BEFORE PROBING:
+- After a complex answer, briefly reflect back what you understood before asking a follow-up.
+- Example: "So if I understand correctly, you used Redis to cache session data and reduce DB load — is that right?"
+- If the candidate corrects you, update your understanding before continuing.
+- Never evaluate an answer you may have misunderstood.
+
+DEPTH SCORING (internal — never reveal to candidate):
+- SURFACE: candidate named or described something → always probe further
+- MEDIUM: candidate explained how it works → probe for tradeoffs or failures
+- DEEP: candidate explained tradeoffs, failures, scale, alternatives → move on
+- Only move to the next topic after a DEEP answer or 3 follow-ups maximum.
+
+NEVER fill in gaps yourself:
+- If something is ambiguous, ask. Never assume the candidate meant something impressive.
+- Wrong: candidate says "we scaled it" → you assume Kubernetes horizontal scaling
+- Right: candidate says "we scaled it" → you ask "how exactly? Vertically or horizontally? What was the bottleneck?"
 
 OPENING:
 - Start with a warm, short greeting.
@@ -827,7 +839,6 @@ def parse_json_from_ai(raw: str) -> dict | None:
 
 
 def generate_evaluation(role: str, difficulty: str, history: list[dict], memory: dict | None = None) -> dict:
-    # Include memory context so evaluation is informed by observed patterns
     memory_context = ""
     if memory and any(memory.get(k) for k in ["strengths_seen", "weak_signals"]):
         memory_context = f"""
@@ -931,13 +942,9 @@ async def health():
 async def start_session(req: StartRequest):
     session_id = str(uuid.uuid4())
 
-    # Persist to DB (non-blocking)
     await asyncio.to_thread(_db_insert_interview, session_id, req.role, req.difficulty)
-
-    # Create session object
     session = session_mgr.create(session_id, req.role, req.difficulty)
 
-    # Get opening message from AI (in thread — sync HTTP call)
     system_prompt = build_system_prompt(session)
     result = await asyncio.to_thread(
         call_ai,
@@ -950,7 +957,6 @@ async def start_session(req: StartRequest):
     )
     logger.info(f"Session {session_id[:8]}... started via {result.provider} ({result.latency_ms:.0f}ms)")
 
-    # Persist + update session (under lock)
     await asyncio.to_thread(_db_save_message, session_id, "assistant", result.content)
     async with session.lock:
         session.add_ai_message(result.content)
@@ -969,14 +975,10 @@ async def chat(req: ChatRequest):
     async with session.lock:
         if session.completed:
             return {"error": "Interview already completed"}
-
-        # Record user answer
         session.add_user_message(req.message)
 
-    # Persist user message (non-blocking, outside lock)
     await asyncio.to_thread(_db_save_message, req.session_id, "user", req.message)
 
-    # ── Update semantic memory (every N answers) ──
     if session.needs_memory_update:
         current_mem = session.memory
         recent = session.context_messages
@@ -986,9 +988,8 @@ async def chat(req: ChatRequest):
         async with session.lock:
             session.set_memory(updated_mem)
 
-    # ── Check if interview should end ──
     if session.should_evaluate:
-        history = session.history  # returns a copy
+        history = session.history
         mem = session.memory
         evaluation = await asyncio.to_thread(
             generate_evaluation, req.role, req.difficulty, history, mem
@@ -998,9 +999,8 @@ async def chat(req: ChatRequest):
             session.mark_completed()
         return {"completed": True, "evaluation": evaluation}
 
-    # ── Continue interview (prompt now includes memory + adaptation) ──
     system_prompt = build_system_prompt(session)
-    context = session.context_messages  # returns a copy
+    context = session.context_messages
 
     result = await asyncio.to_thread(
         call_ai,
@@ -1009,7 +1009,6 @@ async def chat(req: ChatRequest):
         0.75,
     )
 
-    # Persist + update session
     await asyncio.to_thread(_db_save_message, req.session_id, "assistant", result.content)
     async with session.lock:
         session.add_ai_message(result.content)
@@ -1017,13 +1016,12 @@ async def chat(req: ChatRequest):
     return {
         "completed": False,
         "response": result.content,
-        "question_count": session.user_answer_count + 1,  # 1-based for frontend compat
-        "memory": session.memory,  # expose to frontend for real-time insight display
+        "question_count": session.user_answer_count + 1,
+        "memory": session.memory,
     }
 
 
 # ── Streaming Chat (SSE) ──
-
 
 async def _generate_stream(session: InterviewSession, req: ChatRequest):
     """SSE generator: streams tokens from Groq, falls back to Gemini batch."""
@@ -1050,14 +1048,13 @@ async def _generate_stream(session: InterviewSession, req: ChatRequest):
                     delta = chunk.choices[0].delta
                     if delta and delta.content:
                         q.put(delta.content)
-                q.put(None)  # done sentinel
-                return  # success — exit the loop
+                q.put(None)
+                return
             except Exception as e:
                 logger.warning(f"Groq stream key failed: {str(e)[:80]}")
                 if "429" in str(e):
                     entry["cooldown_until"] = datetime.now(timezone.utc) + timedelta(minutes=5)
                 continue
-        # All Groq keys failed — signal fallback
         q.put(Exception("All Groq keys exhausted for streaming"))
 
     loop = asyncio.get_running_loop()
@@ -1078,7 +1075,6 @@ async def _generate_stream(session: InterviewSession, req: ChatRequest):
         full_content = result.content
         yield f"data: {json.dumps({'type': 'token', 'content': full_content})}\n\n"
 
-    # Persist + update session
     await asyncio.to_thread(_db_save_message, req.session_id, "assistant", full_content)
     async with session.lock:
         session.add_ai_message(full_content)
@@ -1250,32 +1246,25 @@ async def transcribe_audio(file: UploadFile = File(...)):
     """
     Receive audio blob from frontend (webm/wav),
     send to Groq Whisper, return transcript text.
-    Whisper handles technical vocabulary far better than Web Speech API.
     """
     audio_bytes = await file.read()
     if not audio_bytes:
         return {"error": "No audio received"}
 
-    # Try each Groq key
     for entry in groq_clients:
         if not _client_available(entry):
             continue
         try:
-            # Groq expects a file-like with a name so it knows the format
             audio_file = (file.filename or "audio.webm", io.BytesIO(audio_bytes), file.content_type or "audio/webm")
-
             result = entry["client"].audio.transcriptions.create(
                 model="whisper-large-v3",
                 file=audio_file,
                 language="en",
                 response_format="text",
             )
-
-            # result is plain text when response_format="text"
             text = result.strip() if isinstance(result, str) else result.text.strip()
             logger.info(f"Whisper transcript: {text[:80]}")
             return {"transcript": text}
-
         except Exception as e:
             logger.warning(f"Whisper failed on key: {str(e)[:100]}")
             if "429" in str(e) or "rate" in str(e).lower():
