@@ -231,7 +231,12 @@ export default function App() {
         {/* ── Sidebar ── */}
         <div className="sidebar">
           <div className="logo">
-            <div className="logo-icon">🎯</div>
+            <div className="logo-icon">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96-.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.84A2.5 2.5 0 0 1 9.5 2"/>
+                <path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96-.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.84A2.5 2.5 0 0 0 14.5 2"/>
+              </svg>
+            </div>
             <div className="logo-text">Interview<span>Coach</span></div>
           </div>
 
@@ -293,19 +298,6 @@ export default function App() {
             </div>
           </div>
 
-          <div>
-            <div className="section-label">Topic coverage</div>
-            <div style={{marginTop:8}}>
-              {role.topics.map((t,i) => (
-                <div key={t} className="topic-row">
-                  <span className="topic-name">{t}</span>
-                  <div className="topic-bar-bg"><div className="topic-bar" style={{width:`${topicCoverage[i]}%`}}/></div>
-                  <span className="topic-pct">{topicCoverage[i]}%</span>
-                </div>
-              ))}
-            </div>
-          </div>
-
           {!voice.voiceActive && (
             <button className="voice-start-btn" onClick={() => voice.startVoice(role.label, difficulty)} disabled={starting}>
               🎙️ Start Voice Interview
@@ -336,6 +328,9 @@ export default function App() {
                 }
               </div>
             </div>
+            <div className="chat-progress-bar-wrap">
+              <div className="chat-progress-bar" style={{width:`${(progress/10)*100}%`}}/>
+            </div>
 
             <div className="messages">
               {starting && (
@@ -346,13 +341,20 @@ export default function App() {
               )}
               {messages.map((msg,i) => (
                 <div key={i} className={`msg${msg.role==="user"?" user":""}`}>
-                  <div className={`avatar${msg.role==="user"?" user":" ai"}`}>{msg.role==="user"?"You":"AI"}</div>
+                  <div className={`avatar${msg.role==="user"?" user":" ai"}`}>
+                    {msg.role==="user"
+                      ? <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+                      : <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="11" width="18" height="10" rx="2"/><circle cx="12" cy="5" r="2"/><path d="M12 7v4"/><line x1="8" y1="16" x2="8" y2="16"/><line x1="16" y1="16" x2="16" y2="16"/></svg>
+                    }
+                  </div>
                   <div className={`bubble${msg.role==="user"?" user":" ai"}`}>{msg.content}</div>
                 </div>
               ))}
               {loading && (
                 <div className="msg">
-                  <div className="avatar ai">AI</div>
+                  <div className="avatar ai">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="11" width="18" height="10" rx="2"/><circle cx="12" cy="5" r="2"/><path d="M12 7v4"/><line x1="8" y1="16" x2="8" y2="16"/><line x1="16" y1="16" x2="16" y2="16"/></svg>
+                  </div>
                   <div className="bubble ai"><div className="thinking-dots"><span/><span/><span/></div></div>
                 </div>
               )}
@@ -382,14 +384,22 @@ export default function App() {
           {!interviewCompleted && !evaluating && (
             <>
               <div>
-                <div className="section-label">Interview progress</div>
-                <div style={{marginTop:12}}>
-                  <div style={{display:"flex",justifyContent:"space-between",fontSize:12,color:"var(--text2)",marginBottom:6}}>
-                    <span>Questions completed</span>
-                    <span style={{fontFamily:"'DM Mono',monospace",color:"var(--text3)"}}>{progress} / 10</span>
-                  </div>
-                  <div className="progress-bar-bg">
-                    <div className="progress-bar" style={{width:`${(progress/10)*100}%`}}/>
+                <div className="section-label">Progress</div>
+                <div className="score-ring-wrap" style={{marginTop:8}}>
+                  <div className="score-ring">
+                    <svg width="90" height="90" viewBox="0 0 90 90">
+                      <circle cx="45" cy="45" r="36" fill="none" stroke="var(--surface3)" strokeWidth="7"/>
+                      <circle cx="45" cy="45" r="36" fill="none" stroke="var(--accent)" strokeWidth="7"
+                        strokeDasharray={circleLen}
+                        strokeDashoffset={circleLen - (progress/10)*circleLen}
+                        strokeLinecap="round"
+                        style={{transition:"stroke-dashoffset .6s ease"}}
+                      />
+                    </svg>
+                    <div className="score-center">
+                      <div className="score-num" style={{color:"var(--accent)",fontSize:20}}>{progress}</div>
+                      <div className="score-max">/ 10</div>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -397,25 +407,29 @@ export default function App() {
               <div>
                 <div className="section-label">Status</div>
                 <div style={{marginTop:10}}>
-                  <div className="weak-tag amber">Interview in progress...</div>
-                  <div className="weak-tag amber">Score & feedback appear after completion</div>
+                  <div className="status-live"><span className="status-pulse"/><span>Interview in progress</span></div>
+                  <div style={{fontSize:12,color:"var(--text3)",marginTop:8,lineHeight:1.5}}>Score & feedback appear after completion</div>
                 </div>
               </div>
 
               <div>
                 <div className="section-label">Topic coverage</div>
                 <div style={{marginTop:10}}>
-                  {role.topics.map((t,i) => (
-                    <div key={t} className="criteria-row">
-                      <div className="criteria-header">
-                        <span className="criteria-name">{t}</span>
-                        <span className="criteria-score">{topicCoverage[i]}%</span>
+                  {role.topics.map((t,i) => {
+                    const pct = topicCoverage[i]
+                    const barColor = pct >= 70 ? "var(--green)" : pct >= 35 ? "var(--amber)" : "var(--accent)"
+                    return (
+                      <div key={t} className="criteria-row">
+                        <div className="criteria-header">
+                          <span className="criteria-name">{t}</span>
+                          <span className="criteria-score">{pct}%</span>
+                        </div>
+                        <div className="criteria-bar-bg">
+                          <div className="criteria-bar" style={{width:`${pct}%`,background:barColor}}/>
+                        </div>
                       </div>
-                      <div className="criteria-bar-bg">
-                        <div className="criteria-bar" style={{width:`${topicCoverage[i]}%`,background:"var(--accent)"}}/>
-                      </div>
-                    </div>
-                  ))}
+                    )
+                  })}
                 </div>
               </div>
             </>
