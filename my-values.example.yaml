@@ -1,0 +1,6 @@
+﻿backend:
+  env:
+    GROQ_API_KEY: "your_groq_key_here"
+    GROQ_API_KEY_2: "your_groq_key_2_here"
+    GROQ_API_KEY_3: "your_groq_key_3_here"
+    OPENROUTER_API_KEYS: "sk-or-key1,sk-or-key2"
